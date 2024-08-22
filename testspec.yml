@@ -1,0 +1,17 @@
+version: 0.2
+
+phases:
+  install:
+    runtime-versions:
+      nodejs: 18
+    commands:
+      - npm i -g yarn @nestjs/cli
+  pre_build:
+    commands:
+      - rm -f .gitignore
+      - yarn install --frozen-lockfile
+  build:
+    commands:
+      - yarn test
+artifacts:
+  files: '**/*'

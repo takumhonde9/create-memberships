@@ -1,0 +1,9 @@
+service: nest-serverless-example
+
+provider:
+  name: aws
+  runtime: nodejs18.x
+
+functions:
+  job:
+    handler: dist/main.handler

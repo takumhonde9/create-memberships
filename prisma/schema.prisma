@@ -1,0 +1,123 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Account {
+  id            String           @id @default(cuid())
+  notifications Notification[]
+  events        UserEvent[]
+  memberhsips   ClubMembership[]
+  payments      Payment[]
+
+  @@map("accounts")
+}
+
+model Auction {
+  id         Int           @id @default(autoincrement())
+  seats      Int           @db.SmallInt
+  statusCode String        @db.Char(1)
+  clubId     String
+  entryPrice Decimal       @db.Money
+  artistId   String
+  startsAt   DateTime      @default(now())
+  endsAt     DateTime
+  bids       AuctionBid[]
+  status     AuctionStatus @relation(fields: [statusCode], references: [code], onDelete: Cascade)
+  club       Club          @relation(fields: [clubId], references: [id], onDelete: Cascade)
+
+  @@map("auctions")
+}
+
+model AuctionStatus {
+  code     String    @id @db.Char(1)
+  name     String    @db.Char(25)
+  desc     String    @db.Text
+  auctions Auction[]
+
+  @@map("auction_statuses")
+}
+
+model AuctionBid {
+  id        Int      @id @default(autoincrement())
+  amount    Decimal  @db.Money
+  auctionId Int
+  accountId String
+  paymentId Int      @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  auction   Auction  @relation(fields: [auctionId], references: [id], onDelete: Cascade)
+  payment   Payment  @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+
+  @@map("auction_bids")
+}
+
+model Club {
+  id          String           @id @default(cuid())
+  memberhsips ClubMembership[]
+  auctions    Auction[]
+
+  @@map("clubs")
+}
+
+model ClubMembership {
+  id        String   @id @default(cuid())
+  ownerId   String
+  clubId    String
+  number    Int
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  owner     Account  @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  club      Club     @relation(fields: [clubId], references: [id], onDelete: Cascade)
+
+  @@map("club_memberships")
+}
+
+model Payment {
+  id              Int         @id @default(autoincrement())
+  provider        String
+  externalId      String
+  paymentMethodId Int?
+  payeeId         String
+  createdAt       DateTime    @default(now())
+  bid             AuctionBid?
+  status          String      @default("on_hold")
+  message         String      @default("")
+  payee           Account     @relation(fields: [payeeId], references: [id], onDelete: Cascade)
+
+  @@map("payments")
+}
+
+model Notification {
+  id          Int       @id @default(autoincrement())
+  recipientId String
+  eventId     Int
+  read        Boolean   @default(false)
+  createdAt   DateTime  @default(now())
+  recipient   Account   @relation(fields: [recipientId], references: [id], onDelete: Cascade)
+  event       UserEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@map("notifications")
+}
+
+model UserEvent {
+  id           Int            @id @default(autoincrement())
+  actorId      String
+  name         String
+  entityId     String // a reference to the action/item e.g Like/bookmark
+  entityName   String
+  notification Notification[]
+  actor        Account        @relation(fields: [actorId], references: [id], onDelete: Cascade)
+
+  @@map("user_events")
+}
