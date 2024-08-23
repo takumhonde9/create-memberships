@@ -19,8 +19,18 @@ model Account {
   events        UserEvent[]
   memberhsips   ClubMembership[]
   payments      Payment[]
+  artist        Artist?
 
   @@map("accounts")
+}
+
+model Artist {
+  id        String  @id @default(cuid())
+  accountId String  @unique
+  account   Account @relation(fields: [accountId], references: [id])
+  club      Club?
+
+  @@map("artists")
 }
 
 model Auction {
@@ -65,37 +75,52 @@ model AuctionBid {
 model Club {
   id          String           @id @default(cuid())
   memberhsips ClubMembership[]
+  artistId    String           @unique()
   auctions    Auction[]
+  artist      Artist           @relation(fields: [artistId], references: [id], onDelete: Cascade)
 
   @@map("clubs")
 }
 
 model ClubMembership {
-  id        String   @id @default(cuid())
-  ownerId   String
-  clubId    String
-  number    Int
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  owner     Account  @relation(fields: [ownerId], references: [id], onDelete: Cascade)
-  club      Club     @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  id                   String                @id @default(cuid())
+  ownerId              String
+  clubId               String
+  number               Int
+  createdAt            DateTime              @default(now())
+  updatedAt            DateTime              @updatedAt
+  owner                Account               @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  club                 Club                  @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  membershipOnPayments PaymentOnMembership[]
 
   @@map("club_memberships")
 }
 
 model Payment {
-  id              Int         @id @default(autoincrement())
-  provider        String
-  externalId      String
-  paymentMethodId Int?
-  payeeId         String
-  createdAt       DateTime    @default(now())
-  bid             AuctionBid?
-  status          String      @default("on_hold")
-  message         String      @default("")
-  payee           Account     @relation(fields: [payeeId], references: [id], onDelete: Cascade)
+  id                   Int                   @id @default(autoincrement())
+  provider             String
+  externalId           String
+  paymentMethodId      Int?
+  payeeId              String
+  createdAt            DateTime              @default(now())
+  bid                  AuctionBid?
+  status               String                @default("on_hold")
+  message              String                @default("")
+  payee                Account               @relation(fields: [payeeId], references: [id], onDelete: Cascade)
+  paymentOnMemberships PaymentOnMembership[]
 
   @@map("payments")
+}
+
+model PaymentOnMembership {
+  id           Int            @id @default(autoincrement())
+  paymentId    Int
+  membershipId String
+  payment      Payment        @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  membership   ClubMembership @relation(fields: [membershipId], references: [id], onDelete: Cascade)
+  createdAt    DateTime       @default(now())
+
+  @@map("payments_on_memberships")
 }
 
 model Notification {

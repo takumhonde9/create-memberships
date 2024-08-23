@@ -20,3 +20,12 @@ export function toObject<T>(data: any): T {
 export function defined(x: any) {
   return x !== undefined;
 }
+
+/**
+ *
+ * @param num
+ * @param max
+ */
+export function capAt(num: number, max: number) {
+  return num > max ? max : num;
+}

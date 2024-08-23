@@ -1,27 +1,21 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { PrismaService } from '../prisma';
+import { Account, Artist, Auction, AuctionBid, Club } from '@prisma/client';
+import { ConfigType } from '@nestjs/config';
 import Stripe from 'stripe';
 import { StripeConfig } from './config';
-import { ConfigType } from '@nestjs/config';
-import { Auction, AuctionBid } from '@prisma/client';
+import { PrismaService } from '../prisma';
+import {
+  NotificationsService,
+  UserEvent,
+  UserEventsUtility,
+} from '../notifications';
+import { AuctionStatusEnum, PaymentStatusEnum } from './enums';
+import { capAt, EntityNameEnum } from '../common';
 
-function capAt(num: number, max: number) {
-  return num > max ? max : num;
-}
-
-export enum AuctionStatusEnum {
-  Started = 'S',
-  Aborted = 'A',
-  Processing = 'P',
-  Ended = 'E',
-}
-
-export enum PaymentStatusEnum {
-  Succeeded = 'withdrawn',
-  Failed = 'failed',
-  CancellationFailure = 'cancellation_failure',
-  Cancelled = 'cancelled',
-}
+type AuctionResponse = Auction & {
+  _count: { bids: number };
+  club: Club & { artist: Artist & { account: Account } };
+};
 
 @Injectable()
 export class AuctionsService {
@@ -30,7 +24,9 @@ export class AuctionsService {
   constructor(
     @Inject(StripeConfig.KEY)
     private readonly config: ConfigType<typeof StripeConfig>,
-    private prismaService: PrismaService,
+    private readonly userEventsUtility: UserEventsUtility,
+    private readonly notificationsService: NotificationsService,
+    private readonly prismaService: PrismaService,
   ) {
     this.stripe = new Stripe(config.Secret, {
       apiVersion: '2024-06-20',
@@ -38,20 +34,21 @@ export class AuctionsService {
   }
 
   async process(data: { auctionIds: number[] }) {
-    const auctions = await this.prismaService.auction.findMany({
+    const auctions = (await this.prismaService.auction.findMany({
       where: {
         id: {
           in: data.auctionIds,
         },
       },
       include: {
+        club: { include: { artist: { include: { account: true } } } },
         _count: {
           select: {
             bids: true,
           },
         },
       },
-    });
+    })) as Array<AuctionResponse>;
 
     const closeAuction = async (id: number) => {
       await this.prismaService.auction.update({
@@ -70,13 +67,6 @@ export class AuctionsService {
       }
       // if the auction ended with no bids - skip it
       if (auction._count.bids === 0) {
-        console.log({
-          message: 'Auction has no bids',
-          context: {
-            auctionId: auction.id,
-          },
-        });
-
         await closeAuction(auction.id);
         continue;
       }
@@ -87,7 +77,7 @@ export class AuctionsService {
     }
   }
 
-  async processAllBids(auction: Auction) {
+  async processAllBids(auction: AuctionResponse) {
     const batchSize = 100;
     let offset = 0;
     let bids: AuctionBid[];
@@ -111,14 +101,18 @@ export class AuctionsService {
       for await (const bid of bids) {
         if (remainingMemberships > 0) {
           try {
-            await this.processWinningBid(bid.accountId, auction.clubId);
+            await this.processWinningBid(
+              bid.accountId,
+              auction.clubId,
+              auction.club.artist.account.id,
+            );
 
             remainingMemberships--;
           } catch (e) {
-            await this.processLosingBid(bid.accountId);
+            await this.processLosingBid(bid.accountId, auction.clubId);
           }
         } else {
-          await this.processLosingBid(bid.accountId);
+          await this.processLosingBid(bid.accountId, auction.clubId);
         }
       }
 
@@ -126,13 +120,13 @@ export class AuctionsService {
     } while (bids.length > 0);
   }
 
-  async processLosingBid(accountId: string) {
+  async processLosingBid(bidderAccountId: string, clubId: string) {
     const isDevEnv = this.config.NestEnvironment !== 'development';
 
     const payment = await this.prismaService.payment.findFirst({
       where: {
         bid: {
-          accountId,
+          accountId: bidderAccountId,
         },
       },
     });
@@ -152,7 +146,27 @@ export class AuctionsService {
         },
       });
 
-      console.log(`Send "AUCTION_LOST" notification ${accountId}`);
+      console.log(`Send "AUCTION_LOST" notification ${bidderAccountId}`);
+      await this.userEventsUtility
+        .createOne({
+          event: {
+            name: UserEvent.Auction.Lost,
+            actor: bidderAccountId,
+          },
+          entity: {
+            name: EntityNameEnum.Club,
+            id: clubId,
+          },
+        })
+        .then(
+          async (event) =>
+            await this.notificationsService.create({
+              data: {
+                recipientId: bidderAccountId,
+                eventId: event.id,
+              },
+            }),
+        );
     } catch (e) {
       console.error(`[processLosingBid] Error: ${e}`);
 
@@ -171,14 +185,18 @@ export class AuctionsService {
     }
   }
 
-  async processWinningBid(accountId: string, clubId: string) {
+  async processWinningBid(
+    bidderAccountId: string,
+    clubId: string,
+    artistAccountId: string,
+  ) {
     const isDevEnv = this.config.NestEnvironment !== 'development';
 
     // get the payment intent
     const payment = await this.prismaService.payment.findFirst({
       where: {
         bid: {
-          accountId,
+          accountId: bidderAccountId,
         },
       },
     });
@@ -202,6 +220,28 @@ export class AuctionsService {
           });
         }
 
+        // Send PaymentFailed notification
+        await this.userEventsUtility
+          .createOne({
+            event: {
+              name: UserEvent.Payment.Failed,
+              actor: bidderAccountId,
+            },
+            entity: {
+              name: EntityNameEnum.Payment,
+              id: payment.id.toString(),
+            },
+          })
+          .then(
+            async (event) =>
+              await this.notificationsService.create({
+                data: {
+                  recipientId: bidderAccountId,
+                  eventId: event.id,
+                },
+              }),
+          );
+
         return;
       }
 
@@ -212,11 +252,16 @@ export class AuctionsService {
         },
       });
 
-      await this.prismaService.clubMembership.create({
+      const membership = await this.prismaService.clubMembership.create({
         data: {
           clubId,
           number: membershipCount + 1,
-          ownerId: accountId,
+          ownerId: bidderAccountId,
+          membershipOnPayments: {
+            create: {
+              paymentId: payment.id,
+            },
+          },
         },
       });
 
@@ -231,7 +276,47 @@ export class AuctionsService {
       });
 
       // create a "NEW_MEMBERSHIP" event and create notification
-      console.log('Send "AUCTION_WON" notification');
+      await this.userEventsUtility
+        .createOne({
+          event: {
+            name: UserEvent.Club.Joined,
+            actor: bidderAccountId,
+          },
+          entity: {
+            name: EntityNameEnum.ClubMembership,
+            id: membership.id,
+          },
+        })
+        .then(
+          async (event) =>
+            await this.notificationsService.create({
+              data: {
+                recipientId: bidderAccountId,
+                eventId: event.id,
+              },
+            }),
+        );
+      // create a "PAYMENT_RECEIVED" event and create notification
+      await this.userEventsUtility
+        .createOne({
+          event: {
+            name: UserEvent.Payment.Received,
+            actor: bidderAccountId,
+          },
+          entity: {
+            name: EntityNameEnum.Payment,
+            id: payment.id.toString(),
+          },
+        })
+        .then(
+          async (event) =>
+            await this.notificationsService.create({
+              data: {
+                recipientId: artistAccountId,
+                eventId: event.id,
+              },
+            }),
+        );
     } catch (e) {
       console.error(`[processWinningBid] Error: ${e}`);
       // update the payments
@@ -247,6 +332,26 @@ export class AuctionsService {
 
       // create a "PAYMENT_FAILED" event and create notification
       console.log('Send "PAYMENT_FAILED" notification');
+      await this.userEventsUtility
+        .createOne({
+          event: {
+            name: UserEvent.Payment.Failed,
+            actor: bidderAccountId,
+          },
+          entity: {
+            name: EntityNameEnum.Payment,
+            id: payment.id.toString(),
+          },
+        })
+        .then(
+          async (event) =>
+            await this.notificationsService.create({
+              data: {
+                recipientId: bidderAccountId,
+                eventId: event.id,
+              },
+            }),
+        );
     }
   }
 }
